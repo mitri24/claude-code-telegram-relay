@@ -1,0 +1,6 @@
+#!/bin/bash
+# Startet Claude Code mit Telegram-Vermittlung: Die Session meldet sich bei dir, immer nur eine gleichzeitig.
+# Der Kanal-Schalter steht am Ende, weil er alle folgenden Argumente als Kanäle liest.
+DIR="$HOME/.claude/vermittlung"
+VERMITTLUNG_AKTIV=1 exec claude "$@" --settings "$DIR/settings.json" \
+  --dangerously-load-development-channels server:vermittlung

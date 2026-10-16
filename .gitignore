@@ -1,0 +1,14 @@
+node_modules/
+# runtime data never belongs in the repo (lives in ~/.claude/vermittlung by default)
+.env
+geheim
+zugang.json
+themen.json
+zustand.json
+verlauf/
+tmp/
+modelle/
+*.log
+daemon.out
+daemon.pid
+settings.json

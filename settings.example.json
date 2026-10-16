@@ -1,0 +1,8 @@
+{
+  "permissions": { "allow": ["mcp__vermittlung__melden", "mcp__vermittlung__beenden"] },
+  "hooks": {
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "\"__NODE__\" \"__REPO__/stopp.mjs\"", "timeout": 5 } ] }
+    ]
+  }
+}

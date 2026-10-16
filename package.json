@@ -1,0 +1,19 @@
+{
+  "name": "claude-code-telegram-relay",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Relay between several Claude Code sessions and one Telegram bot: one conversation at a time, a chat per ticket, voice replies transcribed locally.",
+  "type": "module",
+  "bin": { "claude-ticket": "./claude-ticket" },
+  "scripts": {
+    "setup": "node vermittlung.mjs einrichten",
+    "status": "node vermittlung.mjs status",
+    "restart": "node vermittlung.mjs neustart"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "marked": "^15.0.0",
+    "mermaid": "^11.0.0",
+    "zod": "^3.23.8"
+  }
+}
