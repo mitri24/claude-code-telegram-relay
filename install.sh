@@ -1,5 +1,5 @@
 #!/bin/bash
-# One-time setup: dependencies, speech model, Claude Code settings, MCP registration, claude-ticket on PATH.
+# One-time setup: dependencies, speech model, Claude Code settings, MCP registration, claude-ticket and claude-stray on PATH.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")" && pwd)"
 DATA="${VERMITTLUNG_DIR:-$HOME/.claude/vermittlung}"
@@ -23,13 +23,21 @@ fi
 echo "→ writing $DATA/settings.json"
 sed -e "s|__NODE__|$NODE|" -e "s|__REPO__|$REPO|" "$REPO/settings.example.json" > "$DATA/settings.json"
 
+if [ ! -f "$DATA/stray-rolle.md" ]; then
+  echo "→ writing $DATA/stray-rolle.md (role of the Stray chat; edit as you like)"
+  cp "$REPO/stray-rolle.example.md" "$DATA/stray-rolle.md"
+fi
+
 echo "→ registering MCP server 'vermittlung' (user scope; stays silent unless started via claude-ticket)"
 claude mcp remove --scope user vermittlung >/dev/null 2>&1 || true
 claude mcp add --scope user vermittlung -- "$NODE" "$REPO/kanal.mjs"
 
 mkdir -p "$HOME/.local/bin"
-ln -sf "$REPO/claude-ticket" "$HOME/.local/bin/claude-ticket"
-chmod +x "$REPO/claude-ticket"
-echo "→ claude-ticket linked to ~/.local/bin (make sure it is on your PATH)"
+for cmd in claude-ticket claude-stray; do
+  chmod +x "$REPO/$cmd"
+  ln -sf "$REPO/$cmd" "$HOME/.local/bin/$cmd"
+done
+echo "→ claude-ticket and claude-stray linked to ~/.local/bin (make sure it is on your PATH)"
 echo
 echo "Next: node $REPO/vermittlung.mjs einrichten   (paste your bot token, then pair with the code it prints)"
+echo "Then, optionally: tmux new-session -d -s stray claude-stray   (standing chat for side topics)"

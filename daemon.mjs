@@ -153,11 +153,29 @@ async function mitThema(s, senden) {
 async function themaBenennen(s, titel) {
   if (!titel || !(await themaFuer(s))) return
   const rest = titel.replace(new RegExp(`^\\s*${s.ticket}\\s*[·:–-]?\\s*`, 'i'), '').trim() || titel
-  const name = `${s.ticket} · ${rest}`.slice(0, 128)
+  const name = `${s.ticket} · ${rest}`.slice(0, 120)
   const t = themen()
   if (t[s.ticket]?.name === name) return
-  await tg('editForumTopic', { chat_id: chatId(), message_thread_id: s.thread, name })
+  await tg('editForumTopic', { chat_id: chatId(), message_thread_id: s.thread, name: s.themaZeichen ? `${s.themaZeichen} ${name}` : name })
   t[s.ticket] = { ...t[s.ticket], thread: s.thread, name }; themenSpeichern(t)
+}
+
+// Braucht die Session gerade eine Antwort von ihr? Wartend: hat eine Meldung offen. Im Gespräch: hat nach ihrer
+// letzten Nachricht geschrieben und den Zug beendet (Sessions ohne Stop-Hook: hat zuletzt geschrieben).
+function brauchtAntwort(s) {
+  if (schlange.includes(s.sid)) return s.offen.length > 0
+  if (aktiv !== s.sid || s.letzteAusgabe <= s.letzteEingabe) return false
+  return s.letzterStopp === undefined || s.letzterStopp >= s.letzteEingabe
+}
+
+// Themenname trägt den Stand: ⏳ braucht deine Antwort · 🔧 arbeitet · ✅ beendet – lesbar, egal wie Telegram sortiert.
+async function themaStatus(s, zeichen) {
+  if (!(await themaFuer(s))) return
+  const z = zeichen ?? (brauchtAntwort(s) ? '⏳' : '🔧')
+  if (s.themaZeichen === z) return
+  const name = `${z} ${themen()[s.ticket]?.name ?? s.ticket}`.slice(0, 128)
+  await tg('editForumTopic', { chat_id: chatId(), message_thread_id: s.thread, name })
+  s.themaZeichen = z
 }
 
 // ---------- Verlauf: Rohprotokoll jedes Ticket-Chats (lokal, nicht im Repo) ----------
@@ -287,7 +305,7 @@ function antwortWaechter(s, seit) {
   }, 15_000)
 }
 
-const HINWEIS = '\n\n[Vermittlung: Antworte ihr zuerst sofort mit `melden` – kurz, auch mitten in einer Aufgabe. Lange Befehle (Tests, Builds, Installationen) im Hintergrund starten, damit du ansprechbar bleibst. Ihr Wortlaut ist nur der Text oben; richtungsgebend (nicht „ja“/„weiter“/„fix das“)? Dann immer als P# mit einem Satz AI_SUMMARY in ## Entscheidungen, Herkunft USER_ORIGINATED wo sie die Richtung vorgibt oder formt; nie wörtlich. Spec extrem knapp: Problem → Fix, Entscheidungen, Bilder (nur Ordner + Zeile je Bild), Dateien.]'
+const HINWEIS = '\n\n[Vermittlung: Antworte ihr zuerst sofort mit `melden` – kurz, auch mitten in einer Aufgabe. Lange Befehle (Tests, Builds, Installationen) im Hintergrund starten, damit du ansprechbar bleibst. Ihr Wortlaut ist nur der Text oben; richtungsgebend (nicht „ja“/„weiter“/„fix das“)? Dann als P# in ## Entscheidungen: 1–3 Sätze AI_SUMMARY, was sie inhaltlich vorgibt, ohne Kanal oder Form (kein „Telegram“/„Sprache“/„Text“); Herkunft USER_ORIGINATED wo sie die Richtung vorgibt oder formt; nie wörtlich. Commit/Push nur auf ihre ausdrückliche Anweisung. Spec extrem knapp: Problem → Fix, Entscheidungen, Bilder (nur Ordner + Zeile je Bild), Dateien.]'
 
 // Langsame Ausgänge nacheinander im Hintergrund, damit Knöpfe und Nachrichten nie warten
 let langsam = Promise.resolve()
@@ -297,21 +315,40 @@ function imHintergrund(name, fn) {
 
 // ---------- Sessions und Schlange ----------
 const sessions = new Map() // sid -> Session
-const schlange = [] // sids, die auf ein Gespräch warten
+const schlange = [] // sids, die auf ein Gespräch warten – immer nach Platz (Ankunft) sortiert
 let aktiv = null // sid im Gespräch
 let pause = false
+// Feste Reihenfolge (FIFO): jede Session bekommt bei der Anmeldung einen Platz und behält ihn, auch wenn sie
+// zwischendurch unterbrochen wird. Nur „später“ und Stille geben einen neuen Platz am Ende.
+let naechsterPlatz = 1
+// Wartende posten ihre Fragen nicht mehr vorab ins Thema, damit die Themenliste ruhig bleibt; mit VERMITTLUNG_VORAB=1 wieder an.
+const VORAB = process.env.VERMITTLUNG_VORAB === '1'
+// Standard-Chat für Nebensachen (Session mit VERMITTLUNG_TICKET=Stray, siehe claude-stray): bekommt Nachrichten
+// aus dem Hauptchat, wenn gerade kein Gespräch offen ist.
+const STRAY = 'Stray'
+
+function anstellen(sid, ansEnde = false) {
+  const s = sessions.get(sid)
+  if (!s) return
+  if (ansEnde || !s.platz) s.platz = naechsterPlatz++
+  if (!schlange.includes(sid)) schlange.push(sid)
+  schlange.sort((x, y) => (sessions.get(x)?.platz ?? 0) - (sessions.get(y)?.platz ?? 0))
+}
 
 // Warteschlange und noch nicht zugestellte Meldungen überleben einen Neustart (je Worktree).
 const ZUSTAND = join(DIR, 'zustand.json')
 let wiederher = {}
 try { wiederher = JSON.parse(readFileSync(ZUSTAND, 'utf8')); rmSync(ZUSTAND, { force: true }) } catch {}
+if (Number(wiederher._zaehler) > 0) naechsterPlatz = Number(wiederher._zaehler)
 const START = Date.now()
 
 function zustandSichern() {
-  const reihe = [aktiv, ...schlange].filter(Boolean).map(sid => sessions.get(sid)).filter(Boolean)
-  const z = {}
-  reihe.forEach((s, platz) => { z[s.cwd] = { platz, offen: s.offen, warAktiv: s.sid === aktiv } })
-  for (const s of sessions.values()) if (!z[s.cwd] && s.offen.length) z[s.cwd] = { platz: 999, offen: s.offen }
+  const z = { _zaehler: naechsterPlatz }
+  for (const s of sessions.values()) {
+    const wartet = schlange.includes(s.sid)
+    const warAktiv = s.sid === aktiv
+    if (wartet || warAktiv || s.offen.length) z[s.cwd] = { platz: s.platz, offen: s.offen, warAktiv, wartet }
+  }
   try { writeFileSync(ZUSTAND, JSON.stringify(z)) } catch {}
 }
 
@@ -339,9 +376,15 @@ function ereignis(s, e) {
 
 function wartende() { return schlange.length }
 
+function danachZeile() {
+  const danach = schlange.map(sid => sessions.get(sid)?.ticket).filter(Boolean)
+  if (!danach.length) return 'danach: niemand'
+  return `danach: ${danach.slice(0, 3).join(', ')}${danach.length > 3 ? ` +${danach.length - 3}` : ''}`
+}
+
 async function zustellen(s, item) {
   await mitThema(s, async ort => {
-    const kopf = ort.message_thread_id ? '' : `[${s.ticket}] `
+    const kopf = `${s.ticket} · ${danachZeile()}\n\n`
     if (item.art === 'text') {
       if (!item.vorab) {
         await sendeText(`${kopf}${item.text}`, { ...ort, reply_markup: { inline_keyboard: [[{ text: '➡️ Nächstes Ticket', callback_data: `w:${s.sid}` }]] } })
@@ -349,11 +392,12 @@ async function zustellen(s, item) {
         for (const b of item.bilder ?? []) await sendeBild(b, ort).catch(e => log('bild', e.message))
       }
       s.letzteAusgabe = Date.now()
+      tafelPlanen()
       if (VORLESEN && item.vorlesen && aktiv === s.sid && !s.vorgelesen) { s.vorgelesen = true; imHintergrund('vorlesen', () => vorlesen(item.text, ort)) }
       imHintergrund('spec', () => specSenden(s, ort))
     } else if (item.art === 'erlaubnis' && !item.vorab) {
       await sendeText(
-        `🔐 ${kopf}möchte ${item.tool_name}: ${item.description}\n\n${item.input_preview.slice(0, 1500)}\n\n` +
+        `🔐 ${s.ticket} möchte ${item.tool_name}: ${item.description}\n\n${item.input_preview.slice(0, 1500)}\n\n` +
           `Antwort: „ja ${item.request_id}“ oder „nein ${item.request_id}“ – oder Knopf drücken.`,
         {
           ...ort,
@@ -376,6 +420,7 @@ async function gespraechStarten(s) {
   s.vorgelesen = false
   const offen = s.offen.splice(0)
   log('gespräch', s.ticket, `wartend=${wartende()}`)
+  tafelPlanen()
   await mitThema(s, ort => sendeText(`📞 ${s.ticket} ist dran${wartende() ? ` · ${wartende()} warten` : ''}`, ort))
   if (offen.length === 0) ereignis(s, { art: 'verbunden' })
   for (const item of offen) await zustellen(s, item)
@@ -389,16 +434,34 @@ async function naechster() {
   }
 }
 
+// Die Nutzerin holt eine bestimmte Session dran (Knopf, „an DEV-x“, Schreiben im Thema).
+// Die unterbrochene Session kehrt an ihren alten Platz zurück, nicht nach vorne.
+async function anSession(ziel, leise = false) {
+  if (aktiv === ziel.sid) return
+  if (aktiv) anstellen(aktiv)
+  const i = schlange.indexOf(ziel.sid); if (i >= 0) schlange.splice(i, 1)
+  if (!leise) return gespraechStarten(ziel)
+  aktiv = ziel.sid
+  ziel.gespraechSeit = Date.now()
+  ziel.vorgelesen = false
+  ziel.angestupst = false
+  log('gespräch', ziel.ticket, 'von nutzerin')
+  tafelPlanen()
+  for (const item of ziel.offen.splice(0)) await zustellen(ziel, item)
+}
+
 async function einreihen(s, item) {
   if (item) s.offen.push(item)
   if (aktiv === s.sid) {
     for (const i of s.offen.splice(0)) await zustellen(s, i)
     return { status: 'gesendet' }
   }
-  if (!schlange.includes(s.sid)) schlange.push(s.sid)
+  anstellen(s.sid)
   await naechster()
+  tafelPlanen()
   if (aktiv === s.sid) return { status: 'gesendet' }
-  if (item && !item.vorab) await vorabZeigen(s, item).catch(e => log('vorab', e.message))
+  // Nur Freigaben wartender Sessions erscheinen vorab im Thema (sie blockieren die Session); Fragen warten, bis das Ticket dran ist.
+  if (item && !item.vorab && (VORAB || item.art === 'erlaubnis')) await vorabZeigen(s, item).catch(e => log('vorab', e.message))
   return { status: 'wartet', platz: schlange.indexOf(s.sid) + 1, im_gespraech: sessions.get(aktiv)?.ticket ?? null }
 }
 
@@ -433,18 +496,70 @@ async function gespraechEnde(grund) {
     if (grund === 'nutzerin') ereignis(s, { art: 'beendet' })
   }
   if (!pause) await naechster()
+  tafelPlanen()
   const neu = sessions.get(aktiv)
   const ort = s?.thread ? { message_thread_id: s.thread } : {}
   await sendeText(neu ? `➡️ Weiter mit ${neu.ticket}${neu.thread ? ' – in dessen Chat' : ''}.` : pause ? '⏸ Pause.' : '✔️ Niemand wartet gerade.', ort).catch(() => {})
 }
 
+// ---------- Tafel: eine angeheftete Übersicht im Hauptchat, immer in fester Reihenfolge ----------
+const TAFEL = join(DIR, 'tafel.json')
+const tafelDatei = () => { try { return JSON.parse(readFileSync(TAFEL, 'utf8')) } catch { return {} } }
+let tafelTimer = null
+let tafelKette = Promise.resolve()
+
+function tafelPlanen() {
+  clearTimeout(tafelTimer)
+  tafelTimer = setTimeout(() => { tafelKette = tafelKette.then(tafelAktualisieren).catch(e => log('tafel', e.message)) }, 1500)
+}
+
+const titelVon = s => themen()[s.ticket]?.name ?? s.ticket
+
+function zustandVon(s) {
+  if (s.offen.some(i => i.art === 'erlaubnis')) return '🔐 wartet auf Freigabe'
+  if (brauchtAntwort(s)) return '⏳ wartet auf dich'
+  if (schlange.includes(s.sid)) return '💬 meldet sich'
+  if (s.ticket === STRAY && aktiv !== s.sid) return '💭 bereit für Nebensachen'
+  return '🔧 arbeitet'
+}
+
 function liste() {
-  if (sessions.size === 0) return 'Keine Session angemeldet.'
-  const zeilen = [...sessions.values()].map(s => {
-    const zustand = aktiv === s.sid ? '📞 im Gespräch' : schlange.includes(s.sid) ? `⏳ wartet (Platz ${schlange.indexOf(s.sid) + 1})` : '🔧 arbeitet'
-    return `${s.ticket} – ${zustand}`
-  })
-  return `${zeilen.join('\n')}${pause ? '\n\n⏸ Pause: niemand meldet sich, bis du „los“ sagst.' : ''}`
+  if (sessions.size === 0) return '📋 Keine Session angemeldet.'
+  const zeilen = ['📋 Reihenfolge (fest, nach Ankunft)']
+  const a = sessions.get(aktiv)
+  zeilen.push(a ? `📞 Du sprichst mit: ${titelVon(a)} – ${zustandVon(a)}` : '📞 Kein Gespräch offen')
+  schlange.forEach((sid, i) => { const s = sessions.get(sid); if (s) zeilen.push(`${i + 1}. ${titelVon(s)} – ${zustandVon(s)}`) })
+  for (const s of sessions.values()) if (aktiv !== s.sid && !schlange.includes(s.sid)) zeilen.push(`• ${titelVon(s)} – ${zustandVon(s)}`)
+  if (pause) zeilen.push('⏸ Pause: niemand meldet sich, bis du „los“ sagst.')
+  return zeilen.join('\n')
+}
+
+function tafelKnoepfe() {
+  const reihen = []
+  if (aktiv) reihen.push([{ text: '➡️ Weiter', callback_data: `w:${aktiv}` }])
+  const andere = [...schlange, ...[...sessions.keys()].filter(sid => sid !== aktiv && !schlange.includes(sid))]
+  for (let i = 0; i < andere.length; i += 2) {
+    reihen.push(andere.slice(i, i + 2).map(sid => ({ text: `→ ${sessions.get(sid)?.ticket}`, callback_data: `a:${sid}` })))
+  }
+  return { inline_keyboard: reihen }
+}
+
+async function tafelAktualisieren() {
+  const chat = chatId()
+  if (!TOKEN || !chat) return
+  await Promise.all([...sessions.values()].map(s => themaStatus(s).catch(e => log('thema status', e.message))))
+  const text = `${liste()}\n\n⏳ braucht deine Antwort · 🔧 arbeitet · 💬 hat eine Meldung\nStand ${new Date().toLocaleTimeString('de-CH', { hour: '2-digit', minute: '2-digit' })} · Tippe ein Ticket, um es dranzunehmen.`
+  const reply_markup = tafelKnoepfe()
+  const alt = tafelDatei()
+  if (alt.message_id) {
+    try { await tg('editMessageText', { chat_id: chat, message_id: alt.message_id, text, reply_markup }); return } catch (e) {
+      if (/not modified/i.test(e.message)) return
+      log('tafel bearbeiten', e.message)
+    }
+  }
+  const neu = await tg('sendMessage', { chat_id: chat, text, reply_markup, disable_notification: true })
+  writeFileSync(TAFEL, JSON.stringify({ message_id: neu.message_id }))
+  await tg('pinChatMessage', { chat_id: chat, message_id: neu.message_id, disable_notification: true }).catch(e => log('tafel anheften', e.message))
 }
 
 function sessionNach(name) {
@@ -477,7 +592,7 @@ async function erlaubnisAntwort(s, requestId, behavior) {
 async function befehl(text, ort = {}) {
   const n = normal(text)
   if (n === '/liste' || n === 'liste' || n === '/start' || n === '/hilfe' || n === 'hilfe') {
-    await sendeText(`${liste()}\n\nBefehle: weiter · später · an DEV-123 · liste · pause · los\nIn einem Ticket-Chat schreibst du direkt dieser Session.`, ort)
+    await sendeText(`${liste()}\n\nBefehle: weiter · später (ans Ende) · an DEV-123 · liste · pause · los\nIn einem Ticket-Chat schreibst du direkt dieser Session. Die angeheftete Tafel oben zeigt die Reihenfolge.`, ort)
     return true
   }
   if (istWeiter(n)) {
@@ -492,22 +607,20 @@ async function befehl(text, ort = {}) {
     return true
   }
   if (n === 'später' || n === 'spaeter' || n === '/spaeter') {
-    if (aktiv) { const sid = aktiv; aktiv = null; schlange.push(sid); await naechster() }
+    if (aktiv) { const sid = aktiv; aktiv = null; anstellen(sid, true); await naechster(); tafelPlanen() }
     return true
   }
   if (/^(wartet (noch )?(jemand|wer)|wer wartet( noch)?|wer ist dran|wie viele warten( noch)?|status|was ist los|(gibt es )?(irgendwelche )?neue nachrichten|irgendwas neues|gibt es (was|etwas) neues|was gibt es neues)$/.test(n)) {
     await sendeText(liste(), ort)
     return true
   }
-  if (n === 'pause' || n === '/pause') { pause = true; await sendeText('⏸ Pause. Ich halte alle zurück, bis du „los“ sagst.', ort); return true }
-  if (n === 'los' || n === '/los') { pause = false; await sendeText('▶️ Los geht’s.', ort); await naechster(); if (!aktiv) await sendeText('Niemand wartet gerade.', ort); return true }
+  if (n === 'pause' || n === '/pause') { pause = true; tafelPlanen(); await sendeText('⏸ Pause. Ich halte alle zurück, bis du „los“ sagst.', ort); return true }
+  if (n === 'los' || n === '/los') { pause = false; await sendeText('▶️ Los geht’s.', ort); await naechster(); tafelPlanen(); if (!aktiv) await sendeText('Niemand wartet gerade.', ort); return true }
   const an = /^\/?an\s+(dev\s*-?\s*\d+(?:\/\d+)?|\S+)$/.exec(n)
   if (an) {
     const ziel = sessionNach(an[1])
     if (!ziel) { await sendeText(`Keine eindeutige Session „${an[1]}“.\n\n${liste()}`, ort); return true }
-    if (aktiv && aktiv !== ziel.sid) { schlange.unshift(aktiv) }
-    const i = schlange.indexOf(ziel.sid); if (i >= 0) schlange.splice(i, 1)
-    if (aktiv !== ziel.sid) await gespraechStarten(ziel)
+    await anSession(ziel)
     return true
   }
   return false
@@ -568,29 +681,21 @@ async function eingang(msg) {
     if (name) { await sendeText(`${name} läuft gerade nicht. Starte die Session im Worktree mit claude-ticket.`, ort); return }
   }
   if (sThema && aktiv !== sThema.sid) {
-    // Schreiben im Ticket-Chat holt diese Session ins Gespräch; die bisherige wartet vorne.
-    if (aktiv) { schlange.unshift(aktiv) }
-    const i = schlange.indexOf(sThema.sid); if (i >= 0) schlange.splice(i, 1)
-    aktiv = sThema.sid
-    sThema.gespraechSeit = Date.now()
-    sThema.vorgelesen = false
-    log('gespräch', sThema.ticket, 'von nutzerin')
-    for (const item of sThema.offen.splice(0)) await zustellen(sThema, item)
+    // Schreiben im Ticket-Chat holt diese Session ins Gespräch; die bisherige kehrt an ihren Platz zurück.
+    await anSession(sThema, true)
   } else if (!sAktiv) {
-    if (sessions.size === 1) {
-      const [s] = sessions.values()
-      const i = schlange.indexOf(s.sid); if (i >= 0) schlange.splice(i, 1)
-      s.offen.length = 0
-      aktiv = s.sid
-      s.gespraechSeit = Date.now()
-    } else {
-      await sendeText(`Gerade ist kein Gespräch offen. Schreib im Chat des Tickets oder „an DEV-123“.\n\n${liste()}`, ort)
+    // Kein Gespräch offen: die einzige Session oder der Standard-Chat „Stray“ nimmt die Nachricht
+    const ziel = sessions.size === 1 ? [...sessions.values()][0] : [...sessions.values()].find(x => x.ticket === STRAY)
+    if (!ziel) {
+      await sendeText(`Gerade ist kein Gespräch offen. Schreib im Chat des Tickets, „an DEV-123“ oder starte den Stray-Chat (claude-stray).\n\n${liste()}`, ort)
       return
     }
+    await anSession(ziel, true)
   }
   const s = sessions.get(aktiv)
   s.letzteEingabe = Date.now()
   s.angestupst = false
+  tafelPlanen()
   verlauf(s, NAME, art === 'sprache' ? 'Sprachnachricht (Umschrift)' : 'Text', text)
   ereignis(s, { art, text: text + HINWEIS })
   antwortWaechter(s, s.letzteEingabe)
@@ -605,6 +710,13 @@ async function knopf(cq) {
     const jetzt = aktiv === w[1]
     await tg('answerCallbackQuery', { callback_query_id: cq.id, text: jetzt ? '➡️ Weiter' : 'Dieses Gespräch ist schon beendet.' }).catch(() => {})
     if (jetzt) await gespraechEnde('nutzerin')
+    return
+  }
+  const a = /^a:([a-z0-9]+)$/.exec(cq.data ?? '')
+  if (a) {
+    const ziel = sessions.get(a[1])
+    await tg('answerCallbackQuery', { callback_query_id: cq.id, text: ziel ? `→ ${ziel.ticket}` : 'Diese Session läuft nicht mehr.' }).catch(() => {})
+    if (ziel) await anSession(ziel).catch(e => log('an', e.message))
     return
   }
   const m = /^e:(allow|deny):([a-z0-9]+):([a-km-z]{5})$/.exec(cq.data ?? '')
@@ -684,7 +796,7 @@ const server = http.createServer(async (req, res) => {
       // Neustart derselben Session: alte Anmeldung ohne laufende Abfrage ersetzen
       for (const alt of [...sessions.values()]) if (alt.cwd === b.cwd && !alt.warter) await abmelden(alt, 'neu gestartet')
       const sid = randomBytes(4).toString('hex')
-      const s = { sid, cwd: b.cwd, ticket: eindeutig(ticketAus(b.cwd ?? '')), ereignisse: [], offen: [], erlaubnisse: new Map(), warter: null, gesehen: Date.now(), letzteAusgabe: 0, letzteEingabe: 0, angestupst: false }
+      const s = { sid, cwd: b.cwd, ticket: eindeutig(b.ticket ? String(b.ticket).slice(0, 40) : ticketAus(b.cwd ?? '')), ereignisse: [], offen: [], erlaubnisse: new Map(), warter: null, gesehen: Date.now(), letzteAusgabe: 0, letzteEingabe: 0, angestupst: false, platz: 0 }
       sessions.set(sid, s)
       log('angemeldet', s.ticket)
       themaFuer(s).catch(() => {})
@@ -692,23 +804,24 @@ const server = http.createServer(async (req, res) => {
       if (alt) {
         delete wiederher[s.cwd]
         s.offen = alt.offen ?? []
-        s.platz = alt.platz
+        if (Number(alt.platz) > 0) { s.platz = Number(alt.platz); naechsterPlatz = Math.max(naechsterPlatz, s.platz + 1) }
         for (const i of s.offen) if (i.art === 'erlaubnis') s.erlaubnisse.set(i.request_id, true)
         if (alt.warAktiv && !aktiv) {
           aktiv = sid // Gespräch läuft nach dem Neustart einfach weiter
           s.letzteEingabe = Date.now() // offen annehmen, damit der Stop-Hook anstupst
           log('wiederhergestellt', s.ticket, 'im gespräch')
-        } else if (alt.platz < 999 || s.offen.length) {
-          schlange.push(sid)
-          schlange.sort((x, y) => (sessions.get(x)?.platz ?? 500) - (sessions.get(y)?.platz ?? 500))
-          log('wiederhergestellt', s.ticket, `platz=${alt.platz}`)
+        } else if (alt.wartet || s.offen.length) {
+          anstellen(sid)
+          log('wiederhergestellt', s.ticket, `platz=${s.platz}`)
           // kurz warten, bis alle Sessions nach dem Neustart wieder angemeldet sind
           setTimeout(async () => {
             await naechster().catch(() => {})
-            if (aktiv !== s.sid) for (const i of s.offen) if (!i.vorab) await vorabZeigen(s, i).catch(e => log('vorab', e.message))
+            if (aktiv !== s.sid) for (const i of s.offen) if (!i.vorab && (VORAB || i.art === 'erlaubnis')) await vorabZeigen(s, i).catch(e => log('vorab', e.message))
           }, Math.max(0, 8000 - (Date.now() - START)))
         }
       }
+      if (!s.platz) s.platz = naechsterPlatz++
+      tafelPlanen()
       return antwortJson(res, { sid, ticket: s.ticket, telegram: Boolean(TOKEN), gekoppelt: Boolean(zugang().user_id) })
     }
     if (url.pathname === '/ereignis') {
@@ -724,15 +837,21 @@ const server = http.createServer(async (req, res) => {
       return antwortJson(res, { ok: true })
     }
     if (url.pathname === '/stopp') {
-      const s = [...sessions.values()].reverse().find(x => b.cwd === x.cwd || String(b.cwd).startsWith(`${x.cwd}/`))
+      // Längster passender Pfad gewinnt, damit der Stray-Chat (Arbeitsordner über den Worktrees) nicht die Worktrees darunter abfängt
+      const s = [...sessions.values()]
+        .filter(x => b.cwd === x.cwd || String(b.cwd).startsWith(`${x.cwd}/`))
+        .sort((x, y) => y.cwd.length - x.cwd.length)[0]
       if (!s) return antwortJson(res, { ok: true, ignoriert: 'keine Session' })
       log('stopp', s.ticket, b.ausloeser, Math.round(Number(b.dauer ?? 0)))
       s.letzterStopp = Date.now()
+      tafelPlanen()
       if (aktiv === s.sid) {
         if (s.letzteEingabe > s.letzteAusgabe && !s.angestupst) { s.angestupst = true; ereignis(s, { art: 'anstupsen' }) }
         return antwortJson(res, { ok: true })
       }
       if (schlange.includes(s.sid)) return antwortJson(res, { ok: true })
+      // Schon geantwortet oder beendet seit der letzten Eingabe → nicht erneut einreihen (sonst Ping-Pong zwischen zwei Sessions)
+      if (['verbunden', 'text', 'sprache', 'anstupsen'].includes(b.ausloeser) && s.letzteAusgabe >= s.letzteEingabe) return antwortJson(res, { ok: true, ignoriert: 'schon geantwortet' })
       const kurz = Number(b.dauer ?? 0) < 120
       if (b.ausloeser === 'hinweis' || (['lokal', 'beendet', 'spaeter'].includes(b.ausloeser) && kurz)) return antwortJson(res, { ok: true, ignoriert: b.ausloeser })
       return antwortJson(res, await einreihen(s, null))
@@ -752,6 +871,7 @@ const server = http.createServer(async (req, res) => {
       if (b.text) await einreihen(s, { art: 'text', text: String(b.text), bilder: [], vorlesen: b.vorlesen !== false })
       const i = schlange.indexOf(s.sid); if (i >= 0) schlange.splice(i, 1)
       s.offen.length = 0
+      s.letzteAusgabe = Date.now() // beenden zählt als Antwort
       if (aktiv === s.sid) { await sendeText(`✔️ ${s.ticket} arbeitet weiter.`); await gespraechEnde('agent') }
       return antwortJson(res, { ok: true })
     }
@@ -774,6 +894,8 @@ async function abmelden(s, grund) {
   sessions.delete(s.sid)
   const i = schlange.indexOf(s.sid); if (i >= 0) schlange.splice(i, 1)
   log('abgemeldet', s.ticket, grund)
+  if (grund === 'beendet') themaStatus(s, '✅').catch(e => log('thema status', e.message))
+  tafelPlanen()
   if (aktiv === s.sid) {
     aktiv = null
     await sendeText(`📴 Session ${s.ticket} wurde ${grund}.`, s.thread ? { message_thread_id: s.thread } : {}).catch(() => {})
@@ -791,10 +913,11 @@ setInterval(() => {
   if (arbeitet || Date.now() - zuletzt < STILL_MS) return
   log('still', s.ticket)
   aktiv = null
-  schlange.push(s.sid)
+  anstellen(s.sid, true)
   const ort = s.thread ? { message_thread_id: s.thread } : {}
-  sendeText(`💤 ${s.ticket} ist still – ich stelle das Ticket hinten an. Schreib hier, dann kommt es sofort wieder dran.`, ort).catch(() => {})
+  sendeText(`💤 ${s.ticket} ist still – ich stelle das Ticket ans Ende. Schreib hier, dann kommt es sofort wieder dran.`, ort).catch(() => {})
   naechster().catch(() => {})
+  tafelPlanen()
 }, 30_000)
 
 setInterval(() => {

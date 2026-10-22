@@ -1,10 +1,10 @@
 {
   "name": "claude-code-telegram-relay",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Relay between several Claude Code sessions and one Telegram bot: one conversation at a time, a chat per ticket, voice replies transcribed locally.",
+  "description": "Relay between several Claude Code sessions and one Telegram bot: one conversation at a time in a fixed order, a chat per ticket, a pinned board, a standing side-topic chat, voice replies transcribed locally.",
   "type": "module",
-  "bin": { "claude-ticket": "./claude-ticket" },
+  "bin": { "claude-ticket": "./claude-ticket", "claude-stray": "./claude-stray" },
   "scripts": {
     "setup": "node vermittlung.mjs einrichten",
     "status": "node vermittlung.mjs status",

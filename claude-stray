@@ -1,0 +1,7 @@
+#!/bin/bash
+# Stray: a standing chat for side topics that belong to no ticket. Runs permanently in your workspace folder, no branch of its own.
+# Start once (stays open): tmux new-session -d -s stray claude-stray   ·   watch it: tmux attach -t stray
+DIR="${VERMITTLUNG_DIR:-$HOME/.claude/vermittlung}"
+cd "${VERMITTLUNG_STRAY_DIR:-$HOME}" || exit 1
+if [ $# -eq 0 ]; then set -- "$(cat "$DIR/stray-rolle.md")"; fi
+VERMITTLUNG_TICKET=Stray exec claude-ticket "$@"

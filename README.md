@@ -8,8 +8,11 @@ The agents' instructions and the Telegram texts are in German. The setup is desc
 
 ## What it does
 
-- **One at a time.** Only the session whose turn it is pings you. The others wait in a queue. Their pending question shows up silently in their own thread, so you can answer early if you want.
+- **One at a time, in a fixed order.** Only the session whose turn it is pings you. The others wait in a queue ordered by arrival (FIFO). If you jump to another ticket, the interrupted one returns to its old place instead of the front. Only `später` and three minutes of silence move a ticket to the end.
+- **A pinned board.** The relay keeps one pinned message in the main chat and edits it in place: who you are talking to, the numbered queue with each ticket's state, and buttons `➡️ Weiter` and `→ DEV-123` to pick a ticket directly.
+- **Readable thread names.** Each ticket's topic carries its state: `⏳` needs your answer, `🔧` working, `✅` finished. Waiting sessions no longer post their questions into their topic ahead of time (set `VERMITTLUNG_VORAB=1` to get that back), so the topic list only moves when you actually talk to a ticket. Permission prompts of waiting sessions still show up early, because they block the session.
 - **A thread per ticket.** The relay creates a Telegram topic for each ticket (`DEV-123 · Title`). Writing in a thread talks to that session directly.
+- **Stray, a standing chat for side topics.** `claude-stray` starts one permanent session without a ticket or branch, running in your workspace folder. Write to its topic, or to the main chat when no conversation is open, and it answers, looks things up, keeps notes or creates tickets. Its role is a plain text file you can edit.
 - **Voice in, text out.** Voice messages are transcribed **locally** with whisper.cpp. Nothing leaves your machine except the Telegram messages themselves. The agent cleans up the transcript and confirms it ("Verstanden: …").
 - **Always an answer.**
   - "Wartet jemand?" / "status" is answered by the relay itself.
@@ -82,8 +85,9 @@ Confirm the one-time "development channels" warning. The session then talks to y
 |---|---|
 | Voice message or text in a ticket thread | Goes to that session. That session becomes the active conversation. |
 | `weiter` / `nächstes Ticket` / `fertig` / button "➡️ Nächstes Ticket" | Ends the current conversation; the next waiting session comes up. |
-| `später` | Put the current session back at the end of the queue. |
-| `an DEV-123` | Switch to that session. |
+| `später` | Put the current session at the end of the queue. |
+| `an DEV-123`, or the `→ DEV-123` button on the pinned board | Switch to that session; the interrupted one returns to its place in the queue. |
+| Text or voice in the main chat while no conversation is open | Goes to the Stray chat, if it is running. |
 | `liste` / `status` / `wartet jemand?` | Who is active, who is waiting. |
 | `pause` / `los` | Hold all sessions back / resume. |
 | `ja <code>` / `nein <code>`, or the buttons | Answer a permission prompt. A plain "ja" works if only one is open. |
@@ -97,6 +101,16 @@ node vermittlung.mjs stopp
 ```
 
 To watch a session while it runs, start it inside tmux (for example `tmux new -s dev123 claude-ticket "/develop"`). Attach from any terminal, including VS Code's, with `tmux attach -t dev123`.
+
+Start the Stray chat once; it stays open:
+
+```sh
+tmux new-session -d -s stray claude-stray
+```
+
+It runs in `VERMITTLUNG_STRAY_DIR` (default: your home folder) and reads its role from `$VERMITTLUNG_DIR/stray-rolle.md`, which the installer copies from `stray-rolle.example.md`.
+
+Closing a ticket's topic is not possible through the Bot API in private chats; the relay therefore deletes topics only when you ask for it. If a session is still running, its next message recreates the topic, so end the session first.
 
 ## Configuration
 
@@ -113,8 +127,15 @@ Set these environment variables in the shell that runs `claude-ticket` or the re
 | `VERMITTLUNG_STIMME` | `Anna` | macOS voice for read-aloud |
 | `VERMITTLUNG_MODELL` | `$VERMITTLUNG_DIR/modelle/ggml-large-v3-turbo-q5_0.bin` | Whisper model |
 | `VERMITTLUNG_CHROME` | Google Chrome app path | Browser used to render spec PDFs |
+| `VERMITTLUNG_TICKET` | derived from the folder | Fixed ticket name for a session (used by `claude-stray`, which sets `Stray`) |
+| `VERMITTLUNG_VORAB` | off | `1` = waiting sessions post their questions into their topic ahead of their turn (old behaviour) |
+| `VERMITTLUNG_STRAY_DIR` | `$HOME` | Folder the Stray chat runs in |
 
-The ticket ID comes from the worktree folder (`projekt-dev123-…`) or else from the branch name (`…dev-123…`).
+The ticket ID comes from the worktree folder (`projekt-dev123-…`) or else from the branch name (`…dev-123…`), unless `VERMITTLUNG_TICKET` is set.
+
+### Local API
+
+A session that was not started with `claude-ticket` can still join: the relay listens on `127.0.0.1:47823` and expects the header `x-geheim` with the contents of `$VERMITTLUNG_DIR/geheim`. `POST /anmelden {cwd, ticket?}` returns a session id, `POST /melden {sid, text, bilder?, titel?}` sends a message, `POST /beenden {sid, text?}` ends the conversation, and `GET /ereignisse?sid=…` long-polls (25 s) for your replies as `{art: "text" | "sprache", text}`. A session without an open long-poll is dropped after 90 seconds, so keep one running.
 
 ## Data and privacy
 
@@ -138,6 +159,8 @@ The ticket ID comes from the worktree folder (`projekt-dev123-…`) or else from
 | `kanal.mjs` | Claude Code channel (MCP) per session |
 | `stopp.mjs` | Stop hook: reports finished turns to the relay |
 | `vermittlung.mjs` | `einrichten` (token + pairing), `status`, `neustart`, `stopp` |
+| `claude-ticket` | Starts Claude Code with the channel enabled |
+| `claude-stray` | Starts the standing Stray chat (ticket name `Stray`, role from `stray-rolle.md`) |
+| `stray-rolle.example.md` | Template for the Stray role, copied to `$VERMITTLUNG_DIR/stray-rolle.md` by the installer |
 | `spec-pdf.mjs` | Renders a Markdown spec (Mermaid, no embedded images) to PDF |
-| `claude-ticket` | Starts Claude Code with the channel |
 | `install.sh`, `settings.example.json` | One-time setup |
